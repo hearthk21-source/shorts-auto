@@ -1,22 +1,42 @@
 # Shorts Studio
 
-A local-first Korean Shorts workflow dashboard for collecting source notes, scoring pasted comment signals, drafting a hook-to-CTA script, and reviewing three subtitle styles.
+한국어 쇼츠 제작 대시보드입니다. 직접 올린 영상 파일이나 공개 영상 후보를 소재로 등록하고, 소재별 대본 3종을 만든 뒤 선택한 대본의 브라우저 TTS 음성과 자막을 영상에 합쳐 로컬 파일로 저장할 수 있습니다.
 
-## Current behavior
+## 연결된 기능
 
-- Source links, notes, public view/like counts, and pasted comments can be entered manually.
-- The interest score is a transparent heuristic. It combines reach (15%), engagement (20%), comment volume (20%), product-intent comments (30%), and question demand (15%).
-- The script draft has hook, 기, 승, 전, 결, and CTA sections. Every draft remains editable.
-- The three subtitle treatments are 기본형, 강조형, and 질문형. The configured CTA is 제품정보나 설치원하면 댓글남기고 팔로우해주세요.
-- Sources and drafts are stored in the current browser's local storage. They are not sent to an API.
-- The approval control changes a local review status only. It is not a server-side authorization check. Video generation, direct messages, and publishing are not wired to an external service.
-- Script creation is a deterministic editable template. An AI rewrite provider has not been connected.
+- YouTube 한국 인기 차트와 키워드에서 3분 이내 후보를 조회합니다. API가 세로 비율을 제공하지 않으므로 길이만으로 Shorts 영상이라고 단정하지 않습니다.
+- 선택한 영상의 공개 댓글을 관련도순으로 가져와 소재 카드에 저장합니다. 댓글을 자동으로 계정에 작성하거나 DM을 보내지 않습니다.
+- 관심도는 도달 15%, 반응률 20%, 댓글량 20%, 제품 의도 30%, 질문 수요 15%를 반영합니다.
+- MP4·MOV·WebM 영상 파일을 선택하고 영상 내용·기존 대사·주의할 사실을 적어 소재로 등록할 수 있습니다. 원본 파일은 서버로 전송하지 않으며 새로고침하면 파일을 다시 선택해야 합니다.
+- 후킹형·실용 시연형·댓글 질문형 대본 세 가지를 만들고, 영상 생성 전에 사용할 유형을 고릅니다. 업로드 파일의 장면이나 음성을 자동 분석하지 않으므로 대본 참고용 요약 또는 대사를 입력해야 합니다.
+- 기본형·강조형·질문형 자막을 고르고 수정할 수 있습니다.
+- 브라우저의 설치된 음성으로 대본을 미리 듣고, 화면 공유에서 현재 탭과 탭 오디오를 선택하면 자막과 음성을 합친 MP4 또는 WebM 녹화 파일을 무료로 저장할 수 있습니다. 브라우저와 기기에 따라 한국어 음성·녹화 형식 지원이 다릅니다. 녹화 완료 후 실제 파일을 확인하세요.
+- 완료된 영상과 음성 구간에 맞춘 SRT 자막 파일을 내려받을 수 있습니다.
+- 선택한 대본과 자막, 세로 영상 제작 프롬프트를 JSON 제작 패키지로 내려받을 수 있습니다. 이 동작은 영상을 생성하지 않고 비용도 발생시키지 않습니다.
+- 소재와 대본은 현재 브라우저의 localStorage에 저장됩니다. 영상 파일은 저장하지 않습니다. YouTube 검색과 공개 댓글 요청만 서버 API를 통해 Google에 전달됩니다.
 
-## Integration boundary
+## YouTube API 연결
 
-The assistant-side VerseIn connection can list available models without generating media. Image or video generation consumes VerseIn coins and needs approval for the specific job. This app does not call VerseIn yet.
+1. Google Cloud Console에서 프로젝트를 만들고 YouTube Data API v3를 활성화합니다.
+2. API 키를 발급하고 키 제한에서 YouTube Data API v3만 허용합니다.
+3. Vercel의 `shorts-automation` 프로젝트 환경변수에 `YOUTUBE_API_KEY`를 Secret으로 저장합니다. 브라우저 공개 변수(`NEXT_PUBLIC_...`)로 만들거나 저장소·채팅에 붙여 넣지 마세요.
+4. Production 환경에 저장한 뒤 재배포하면 대시보드에서 검색을 사용할 수 있습니다.
 
-The GitHub repository `hearthk21-source/shorts-auto` is available for this project. The Vercel project `shorts-automation` exists, but it does not have a linked Git project yet. Vercel Git access must be granted separately, and deployment remains a separate approval step.
+YouTube API 기본 사용량은 금액 결제가 아니라 일일 할당량으로 제한됩니다. 공식 문서 기준 `search.list`는 하루 100회, `videos.list`와 `commentThreads.list`는 요청당 1 quota unit입니다. 할당량은 Google Cloud Console에서 확인할 수 있습니다.
 
-Automated social-platform collection, AI rewriting, persistent database storage, VerseIn generation, direct messages, and publishing are not wired to external services yet. Do not put OAuth tokens, API keys, or other credentials in source files or browser storage.
+## 승인 경계
+
+- 무료 준비 작업은 자동으로 진행합니다.
+- VerseIn에서 영상 생성에 코인이 사용되기 전에는 해당 작업의 비용과 함께 승인을 받습니다. 이 웹 앱은 아직 VerseIn 생성 API를 직접 호출하지 않습니다.
+- Instagram·YouTube·TikTok 계정에 실제 게시하기 전에는 대상 계정과 최종 영상을 확인받습니다. 계정 게시 OAuth는 아직 연결되지 않았으므로 저장한 완성 영상은 직접 게시해야 합니다.
+- 해외 영상을 포함해 타인의 영상·음원·대본을 재사용할 권리는 별도로 확인해야 합니다. 이 앱은 사용자가 제공한 영상 설명을 바탕으로 새 대본·자막 구성을 준비합니다.
+
+## 실행
+
+```bash
+npm install
+npm run dev
+```
+
+`.env.example`은 필요한 변수 이름만 보여주는 템플릿입니다. 실제 비밀 값은 Vercel Secret 또는 로컬 `.env.local`에 저장하세요.
 
