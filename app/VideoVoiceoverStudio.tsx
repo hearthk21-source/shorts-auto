@@ -194,7 +194,23 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
         const containScale = Math.min(width / videoWidth, height / videoHeight);
         const displayWidth = videoWidth * containScale;
         const displayHeight = videoHeight * containScale;
-        context.drawImage(video, (width - displayWidth) / 2, (height - displayHeight) / 2, displayWidth, displayHeight);
+        const displayX = (width - displayWidth) / 2;
+        const displayY = (height - displayHeight) / 2;
+        context.drawImage(video, displayX, displayY, displayWidth, displayHeight);
+
+        // Obscure the common burned-in subtitle zone before drawing the new captions.
+        const subtitleBlurHeight = Math.min(displayHeight, Math.max(100, displayHeight * 0.22));
+        const subtitleBlurY = displayY + displayHeight - subtitleBlurHeight;
+        context.save();
+        context.beginPath();
+        context.rect(displayX, subtitleBlurY, displayWidth, subtitleBlurHeight);
+        context.clip();
+        context.filter = "blur(18px)";
+        context.drawImage(video, displayX, displayY, displayWidth, displayHeight);
+        context.filter = "none";
+        context.fillStyle = "rgba(12, 17, 14, 0.18)";
+        context.fillRect(displayX, subtitleBlurY, displayWidth, subtitleBlurHeight);
+        context.restore();
 
         const currentCaptionIndex = captionIndexRef.current;
         if (currentCaptionIndex >= 0 && captionLines[currentCaptionIndex]) {
@@ -312,9 +328,9 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
     <section className="panel voiceover-panel">
       <div className="panel-heading">
         <div><p className="eyebrow">STEP 04 / VIDEO + TTS</p><h2>영상에 음성과 자막 입히기</h2></div>
-        <span className="step-tag">파일은 이 브라우저 안에서 처리</span>
+        <span className="step-tag">원본 음소거 · 하단 자막 흐림</span>
       </div>
-      <p className="muted intro-text">업로드 영상의 원래 소리는 최종 파일에서 자동으로 제거하고, 선택한 대본의 TTS와 자막만 합쳐 무료로 녹화합니다. 화면 공유 창에서 현재 탭과 탭 오디오 공유를 선택해 주세요.</p>
+      <p className="muted intro-text">업로드 영상의 원래 소리는 자동으로 제거합니다. 원본 영상에 박힌 자막은 하단 22% 영역을 흐리게 가린 뒤 새 자막을 올립니다. 원본 자막이 화면 위쪽이나 중앙에 있으면 남을 수 있습니다. 선택한 대본의 TTS와 새 자막만 합쳐 무료로 녹화합니다.</p>
       <video ref={videoRef} className="uploaded-video-preview" src={videoUrl} controls muted playsInline onVolumeChange={(event) => { const player = event.currentTarget; if (!player.muted || player.volume !== 0) { player.muted = true; player.volume = 0; } }} onLoadedMetadata={(event) => { event.currentTarget.muted = true; event.currentTarget.volume = 0; setOutputUrl(""); }} />
       <canvas ref={canvasRef} className="render-canvas" aria-hidden="true" />
       <div className="voice-controls">

@@ -133,6 +133,48 @@ function formatVideoDuration(seconds: number): string {
   return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, "0")}`;
 }
 
+function extractYouTubeVideoId(value: string): string | null {
+  try {
+    const url = new URL(value);
+    const hostname = url.hostname.replace(/^www\./, "").toLowerCase();
+    let videoId = "";
+    if (hostname === "youtu.be") videoId = url.pathname.split("/").filter(Boolean)[0] ?? "";
+    else if (["youtube.com", "m.youtube.com", "youtube-nocookie.com"].includes(hostname)) {
+      videoId = url.searchParams.get("v") ?? url.pathname.match(/^\/(?:shorts|embed|live)\/([^/]+)/)?.[1] ?? "";
+    }
+    return /^[a-zA-Z0-9_-]{11}$/.test(videoId) ? videoId : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchUploadedVideoComments(sourceUrl: string): Promise<{ comments: string[]; note: string }> {
+  if (!sourceUrl.trim()) return { comments: [], note: "원본 링크가 없어 댓글은 분석하지 않았습니다. 댓글 분석은 공개 YouTube 링크에서 지원됩니다." };
+  const videoId = extractYouTubeVideoId(sourceUrl);
+  if (!videoId) return { comments: [], note: "이 링크의 댓글은 아직 연결되지 않았습니다. 현재 공개 YouTube 링크만 지원합니다." };
+  try {
+    const response = await fetch(`/api/youtube/comments?videoId=${encodeURIComponent(videoId)}`);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "YouTube 댓글을 불러오지 못했습니다.");
+    return { comments: data.comments ?? [], note: data.note ?? "공개 댓글을 가져왔습니다." };
+  } catch (error) {
+    return { comments: [], note: error instanceof Error ? error.message : "YouTube 댓글을 불러오지 못했습니다." };
+  }
+}
+
+function recommendVideoTitles(file: File, comments: string[]): string[] {
+  const rawName = file.name.replace(/\.[^.]+$/, "").replace(/[_.-]+/g, " ").replace(/\s+/g, " ").trim();
+  const genericName = /^(kakaotalk|whatsapp|video|vid|mov|mp4|clip|recording|screen recording|camera|export|output|final)[\s\d]*$/i.test(rawName);
+  const topic = (genericName || !rawName ? "제품 영상" : rawName).slice(0, 28);
+  const comment = comments.find((item) => /[?？]|제품|가격|구매|구입|설치|링크|정보|주문|어디서|가능|되나요|인가요/.test(item));
+  const question = comment?.replace(/[\r\n]+/g, " ").replace(/[“”\"]/g, "").trim().slice(0, 36);
+  return [
+    question ? `댓글 질문 “${question}”, 영상에서 확인` : `${topic}, 영상에서 실제로 보이는 장면은?`,
+    `${topic} 영상에서 확인되는 모습만 정리`,
+    `${topic} 정보, 확인된 장면으로 간단히 보기`
+  ];
+}
+
 const emptyForm: SourceForm = {
   platform: "직접 입력",
   title: "",
@@ -161,8 +203,9 @@ export default function Home() {
   const [form, setForm] = useState<SourceForm>(emptyForm);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
-  const [uploadTitle, setUploadTitle] = useState("");
-  const [uploadNotes, setUploadNotes] = useState("");
+  const [uploadSourceUrl, setUploadSourceUrl] = useState("");
+  const [uploadedComments, setUploadedComments] = useState<string[]>([]);
+  const [uploadedCommentNote, setUploadedCommentNote] = useState("");
   const [videoAnalysis, setVideoAnalysis] = useState<LocalVideoAnalysis | null>(null);
   const [recommendedTitles, setRecommendedTitles] = useState<string[]>([]);
   const [selectedRecommendedTitle, setSelectedRecommendedTitle] = useState("");
@@ -366,36 +409,29 @@ export default function Home() {
     setVideoAnalysis(null);
     setRecommendedTitles([]);
     setSelectedRecommendedTitle("");
-    setUploadNotes("");
-    const baseName = file.name.replace(/\.[^.]+$/, "");
-    setUploadTitle(baseName);
+    setUploadSourceUrl("");
+    setUploadedComments([]);
+    setUploadedCommentNote("");
     setSelectedDraftId(null);
-    setNotice("영상 파일을 이 브라우저에 불러왔습니다. 원본은 서버로 업로드되지 않습니다.");
+    setNotice("영상 파일을 불러왔습니다. 기기 내 분석을 시작합니다. 원본은 서버로 전송하지 않습니다.");
+    void analyzeUploadedVideo(file, "");
   }
 
-  async function analyzeUploadedVideo() {
-    if (!uploadedFile) return;
+  async function analyzeUploadedVideo(fileToAnalyze: File | null = uploadedFile, sourceUrl = uploadSourceUrl) {
+    if (!fileToAnalyze) return;
     setAnalyzingVideo(true);
     setRecommendedTitles([]);
     setSelectedRecommendedTitle("");
     try {
-      const analysis = await inspectUploadedVideo(uploadedFile);
-      const fileBaseName = uploadTitle.trim();
-      const genericFileName = /^(kakaotalk|whatsapp|video|vid|mov|mp4|clip|recording|screen.?recording)[\s\d_-]*$/i.test(fileBaseName);
-      const noteTopic = uploadNotes.trim().split(/[\n.!?。！？]+/).map((part) => part.trim()).find(Boolean) ?? "";
-      const topic = (genericFileName ? noteTopic : noteTopic || fileBaseName).replace(/\s+/g, " ").slice(0, 30).trim();
-      if (!topic) {
-        setVideoAnalysis(analysis);
-        setNotice("영상 길이와 화면은 분석했습니다. 제목 추천을 위해 영상 주제나 장면 설명을 입력해 주세요.");
-        return;
-      }
-      setVideoAnalysis(analysis);
-      setRecommendedTitles([
-        `${topic} 핵심만 한눈에 보기`,
-        `${topic}에서 놓치기 쉬운 포인트`,
-        `궁금했던 ${topic}, 영상으로 정리`
+      const [analysis, commentData] = await Promise.all([
+        inspectUploadedVideo(fileToAnalyze),
+        fetchUploadedVideoComments(sourceUrl)
       ]);
-      setNotice("영상 길이·화면 비율·샘플 프레임을 분석했습니다. 제목은 입력한 주제와 설명을 바탕으로 추천했으니 세 가지 중 골라 주세요.");
+      setVideoAnalysis(analysis);
+      setUploadedComments(commentData.comments);
+      setUploadedCommentNote(commentData.note);
+      setRecommendedTitles(recommendVideoTitles(fileToAnalyze, commentData.comments));
+      setNotice(`무료 기기 분석을 마쳤습니다. 공개 YouTube 댓글 ${commentData.comments.length}개를 반영했습니다. 추천 제목 3개 중 골라 주세요.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "영상 분석을 완료하지 못했습니다.");
     } finally {
@@ -414,13 +450,13 @@ export default function Home() {
     }
     const source: SourceItem = {
       id: crypto.randomUUID(),
-      platform: "직접 입력",
+      platform: extractYouTubeVideoId(uploadSourceUrl) ? "YouTube" : "직접 입력",
       title: selectedRecommendedTitle,
-      url: "",
-      notes: uploadNotes.trim(),
+      url: uploadSourceUrl.trim(),
+      notes: "",
       views: 0,
       likes: 0,
-      comments: [],
+      comments: uploadedComments,
       createdAt: new Date().toISOString()
     };
     const variants = SCRIPT_TYPE_OPTIONS.map((option) => buildDraft(source, option.id));
@@ -579,7 +615,7 @@ export default function Home() {
               <span className="step-tag">파일은 기기에만</span>
             </div>
             <p className="muted intro-text">
-              영상 길이·화면 비율·샘플 프레임을 이 기기에서 분석하고, 입력한 영상 설명을 바탕으로 제목 세 가지를 추천합니다. 장면·대사의 의미를 읽는 AI 분석은 연결되어 있지 않습니다.
+              업로드하면 영상 길이·화면·샘플 프레임을 이 기기에서 자동 분석하고, 파일명과 공개 댓글을 바탕으로 제목 3개를 추천합니다. 영상 속 제품·음성의 의미를 읽는 AI는 아직 연결되지 않아, 확인되지 않은 기능·효과·가격을 제목에 만들지 않습니다.
             </p>
             <div className="source-form">
               <label>
@@ -590,34 +626,28 @@ export default function Home() {
                 <>
                   <div className="upload-file-card">
                     <strong>{uploadedFile.name}</strong>
-                    <small>{(uploadedFile.size / (1024 * 1024)).toFixed(1)} MB · 업로드 후 이 브라우저 탭에서 사용</small>
+                    <small>{(uploadedFile.size / (1024 * 1024)).toFixed(1)} MB · 이 브라우저 안에서만 처리 · 서버 전송 없음</small>
                   </div>
                   <label>
-                    추천에 참고할 영상 주제
-                    <input value={uploadTitle} onChange={(event) => { setUploadTitle(event.target.value); setVideoAnalysis(null); setRecommendedTitles([]); setSelectedRecommendedTitle(""); }} placeholder="예: 접이식 수납장 조립 방법" />
+                    원본 YouTube 링크 <span className="field-note">댓글 분석용 · 선택</span>
+                    <input type="url" value={uploadSourceUrl} onChange={(event) => setUploadSourceUrl(event.target.value)} onBlur={(event) => { if (uploadedFile) void analyzeUploadedVideo(uploadedFile, event.currentTarget.value); }} placeholder="https://youtu.be/..." />
                   </label>
-                  <label>
-                    장면 설명·기존 대사·확인된 정보 <span className="field-note">제목·대본 참고용</span>
-                    <textarea value={uploadNotes} onChange={(event) => { setUploadNotes(event.target.value); setRecommendedTitles([]); setSelectedRecommendedTitle(""); }} placeholder="영상에서 실제로 보여주는 내용이나 말하는 대사, 과장하면 안 되는 사실을 적어 주세요." rows={4} />
-                  </label>
-                  <button className="button button-dark full-width" type="button" onClick={() => void analyzeUploadedVideo()} disabled={analyzingVideo}>
-                    {analyzingVideo ? "영상 분석 중…" : "영상 분석 후 제목 3가지 추천"} <span>→</span>
-                  </button>
+                  {analyzingVideo && <div className="video-analysis-card"><strong>영상 분석 중…</strong><small>파일 기본 정보와 샘플 프레임을 처리하고 있습니다.</small></div>}
                   {videoAnalysis && (
                     <div className="video-analysis-card">
-                      <strong>기기 내 영상 분석</strong>
+                      <strong>기기 내 영상 분석 · 댓글 {uploadedComments.length}개</strong>
                       <div className="video-analysis-chips">
                         <span>{videoAnalysis.aspectLabel} · {videoAnalysis.width}×{videoAnalysis.height}</span>
                         <span>{formatVideoDuration(videoAnalysis.durationSeconds)}</span>
                         <span>{videoAnalysis.brightnessLabel}</span>
                         <span>{videoAnalysis.visualChangeLabel}</span>
                       </div>
-                      {recommendedTitles.length === 0 && <small>주제나 장면 설명을 적은 뒤 다시 추천받아 주세요.</small>}
+                      <small>{uploadedCommentNote} 제품 내용·음성·효과는 AI로 판별하지 않았습니다.</small>
                     </div>
                   )}
                   {recommendedTitles.length > 0 && (
                     <div className="recommended-title-list">
-                      <strong>추천 제목 중 하나를 선택하세요.</strong>
+                      <strong>확인되지 않은 제품 주장은 넣지 않은 제목 3개 · 하나를 선택하세요.</strong>
                       {recommendedTitles.map((title, index) => (
                         <button className={"recommended-title " + (selectedRecommendedTitle === title ? "selected" : "")} type="button" key={title} aria-pressed={selectedRecommendedTitle === title} onClick={() => setSelectedRecommendedTitle(title)}>
                           <span>0{index + 1}</span><b>{title}</b>{selectedRecommendedTitle === title && <i>선택됨</i>}
@@ -630,7 +660,7 @@ export default function Home() {
                   )}
                 </>
               )}
-              {!uploadedFile && <div className="upload-empty">영상 파일을 선택하면 제목과 설명을 적는 칸이 열립니다.</div>}
+              {!uploadedFile && <div className="upload-empty">영상 파일을 선택하면 자동 분석 후 제목 3개를 추천합니다. 댓글 분석은 공개 YouTube 링크가 있을 때만 가능합니다.</div>}
             </div>
           </section>
 
