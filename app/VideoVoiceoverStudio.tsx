@@ -164,9 +164,13 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
     const timing: TimedCaption[] = [];
 
     try {
+      // Keep the uploaded clip's audio out of the tab capture. The captured tab
+      // audio is used only for the browser TTS narrated below.
+      video.muted = true;
+      video.volume = 0;
       displayStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
       const audioTrack = displayStream.getAudioTracks()[0];
-      if (!audioTrack) throw new Error("화면 공유 창에서 ‘탭 오디오 공유’를 켜야 TTS가 영상에 포함됩니다. 현재 녹화는 시작하지 않았습니다.");
+      if (!audioTrack) throw new Error("화면 공유 창에서 현재 탭의 오디오 공유를 켜야 TTS가 영상에 포함됩니다. 원본 영상 소리는 자동으로 음소거됩니다.");
 
       const context = canvas.getContext("2d");
       if (!context) throw new Error("영상 합성용 캔버스를 준비하지 못했습니다.");
@@ -272,13 +276,13 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
       await new Promise<void>((resolve) => window.setTimeout(resolve, 350));
       recorder.stop();
       const result = await stopped;
-      if (result.size < 1024) throw new Error("녹화 파일이 비어 있습니다. 탭 오디오 공유를 확인한 뒤 다시 시도해 주세요.");
+      if (result.size < 1024) throw new Error("녹화 파일이 비어 있습니다. 현재 탭의 오디오 공유를 확인한 뒤 다시 시도해 주세요.");
       const extension = mimeType.startsWith("video/mp4") ? "mp4" : "webm";
       const name = `${safeFileName(title)}-voiceover.${extension}`;
       setOutputUrl(URL.createObjectURL(result));
       setOutputName(name);
       setTimedCaptions(timing.filter((caption): caption is TimedCaption => Boolean(caption && caption.end > caption.start)));
-      onNotice(`TTS 음성과 선택한 자막을 영상에 합쳤습니다. 완성 파일을 저장해 주세요. (브라우저 녹화 형식: ${extension.toUpperCase()})`);
+      onNotice(`원본 영상 소리를 제거하고 TTS 음성과 선택한 자막을 합쳤습니다. 완성 파일을 저장해 주세요. (브라우저 녹화 형식: ${extension.toUpperCase()})`);
     } catch (error) {
       if (recorder?.state === "recording") recorder.stop();
       window.speechSynthesis.cancel();
@@ -310,8 +314,8 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
         <div><p className="eyebrow">STEP 04 / VIDEO + TTS</p><h2>영상에 음성과 자막 입히기</h2></div>
         <span className="step-tag">파일은 이 브라우저 안에서 처리</span>
       </div>
-      <p className="muted intro-text">한국어 음성을 미리 듣고, 선택한 자막을 영상에 합쳐 무료로 녹화합니다. 화면 공유 창에서 현재 탭과 탭 오디오 공유를 선택해야 음성이 포함됩니다.</p>
-      <video ref={videoRef} className="uploaded-video-preview" src={videoUrl} controls playsInline onLoadedMetadata={() => setOutputUrl("")} />
+      <p className="muted intro-text">업로드 영상의 원래 소리는 최종 파일에서 자동으로 제거하고, 선택한 대본의 TTS와 자막만 합쳐 무료로 녹화합니다. 화면 공유 창에서 현재 탭과 탭 오디오 공유를 선택해 주세요.</p>
+      <video ref={videoRef} className="uploaded-video-preview" src={videoUrl} controls muted playsInline onVolumeChange={(event) => { const player = event.currentTarget; if (!player.muted || player.volume !== 0) { player.muted = true; player.volume = 0; } }} onLoadedMetadata={(event) => { event.currentTarget.muted = true; event.currentTarget.volume = 0; setOutputUrl(""); }} />
       <canvas ref={canvasRef} className="render-canvas" aria-hidden="true" />
       <div className="voice-controls">
         <label>
@@ -334,13 +338,13 @@ export default function VideoVoiceoverStudio({ file, title, script, captionLines
         <strong>녹화 전에 확인하세요</strong>
         <ol>
           <li>녹화 버튼을 누르면 브라우저가 화면 공유를 요청합니다.</li>
-          <li>현재 Shorts Studio 탭을 고르고 ‘탭 오디오 공유’를 켜 주세요.</li>
+          <li>현재 Shorts Studio 탭을 고르고 ‘탭 오디오 공유’를 켜 주세요. 원본 영상 소리는 자동으로 제외됩니다.</li>
           <li>녹화 완료 후 MP4 또는 WebM 파일을 저장하고 게시 전에 직접 확인하세요.</li>
         </ol>
       </div>
       {outputUrl && (
         <div className="render-result">
-          <div><strong>완성 파일 준비됨</strong><small>{outputName} · TTS 음성·자막 포함</small></div>
+          <div><strong>완성 파일 준비됨</strong><small>{outputName} · 원본 소리 제거 · TTS 음성·자막 포함</small></div>
           <div className="render-result-actions">
             <a className="button button-dark" href={outputUrl} download={outputName}>완성 영상 저장</a>
             <button className="button button-outline" type="button" onClick={downloadSrt}>SRT 자막 저장</button>
