@@ -136,8 +136,7 @@ export function buildDraft(source: SourceItem, scriptType: ScriptType = "boldHoo
 
 export function makeCaptionVariants(script: Script): CaptionVariant[] {
   const content = [script.hook, script.gi, script.seung, script.jeon, script.gyeol].filter(Boolean);
-  const cta = script.cta.trim();
-  const withCta = (lines: string[]) => (cta ? [...lines, cta] : lines);
+  const withCta = (lines: string[]) => [...lines, DEFAULT_CTA];
   return [
     {
       style: "clean",

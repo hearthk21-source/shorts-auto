@@ -5,6 +5,7 @@ import VideoVoiceoverStudio from "./VideoVoiceoverStudio";
 import {
   buildDraft,
   buildProductionPrompt,
+  DEFAULT_CTA,
   makeCaptionVariants,
   SCRIPT_TYPE_OPTIONS,
   sampleSources,
@@ -42,6 +43,96 @@ type YouTubeCandidate = {
   url: string;
 };
 
+type LocalVideoAnalysis = {
+  durationSeconds: number;
+  width: number;
+  height: number;
+  aspectLabel: string;
+  brightnessLabel: string;
+  visualChangeLabel: string;
+};
+
+async function inspectUploadedVideo(file: File): Promise<LocalVideoAnalysis> {
+  const url = URL.createObjectURL(file);
+  const video = document.createElement("video");
+  video.preload = "auto";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = url;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+      video.addEventListener("error", () => reject(new Error("이 브라우저에서 영상 정보를 읽지 못했습니다.")), { once: true });
+      video.load();
+    });
+    if (!Number.isFinite(video.duration) || video.videoWidth < 1 || video.videoHeight < 1) {
+      throw new Error("영상 길이 또는 화면 크기를 확인할 수 없습니다.");
+    }
+    if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      await new Promise<void>((resolve, reject) => {
+        video.addEventListener("loadeddata", () => resolve(), { once: true });
+        video.addEventListener("error", () => reject(new Error("영상 프레임을 읽지 못했습니다.")), { once: true });
+      });
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 48;
+    canvas.height = 48;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("영상 프레임 분석을 시작할 수 없습니다.");
+    const sampleTimes = video.duration > 2 ? [0.12, 0.5, 0.88].map((part) => Math.min(video.duration - 0.05, video.duration * part)) : [0];
+    const frames: number[][] = [];
+    let brightnessTotal = 0;
+    let pixelsRead = 0;
+    for (const sampleTime of sampleTimes) {
+      if (Math.abs(video.currentTime - sampleTime) > 0.01) {
+        await new Promise<void>((resolve) => {
+          const finish = () => resolve();
+          video.addEventListener("seeked", finish, { once: true });
+          video.currentTime = sampleTime;
+          window.setTimeout(finish, 1200);
+        });
+      }
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const pixelData = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      const luminance: number[] = [];
+      for (let index = 0; index < pixelData.length; index += 4) {
+        const value = 0.2126 * pixelData[index] + 0.7152 * pixelData[index + 1] + 0.0722 * pixelData[index + 2];
+        luminance.push(value);
+        brightnessTotal += value;
+        pixelsRead += 1;
+      }
+      frames.push(luminance);
+    }
+    const averageBrightness = brightnessTotal / Math.max(1, pixelsRead);
+    const frameDifferences = frames.slice(1).map((frame, frameIndex) =>
+      frame.reduce((total, value, index) => total + Math.abs(value - frames[frameIndex][index]), 0) / frame.length
+    );
+    const visualChange = frameDifferences.length
+      ? frameDifferences.reduce((sum, value) => sum + value, 0) / frameDifferences.length
+      : 0;
+    const ratio = video.videoWidth / video.videoHeight;
+    const aspectLabel = ratio < 0.66 ? "세로형" : ratio > 1.35 ? "가로형" : "정방형에 가까운 화면";
+    return {
+      durationSeconds: video.duration,
+      width: video.videoWidth,
+      height: video.videoHeight,
+      aspectLabel,
+      brightnessLabel: averageBrightness < 85 ? "어두운 장면이 많은 편" : averageBrightness > 175 ? "밝은 장면이 많은 편" : "밝기 균형이 있는 편",
+      visualChangeLabel: visualChange > 32 ? "샘플 프레임의 색·화면 변화가 큰 편" : visualChange > 14 ? "샘플 프레임에 일부 화면 변화가 있음" : "샘플 프레임의 화면 변화가 적은 편"
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+    video.removeAttribute("src");
+    video.load();
+  }
+}
+
+function formatVideoDuration(seconds: number): string {
+  const wholeSeconds = Math.round(seconds);
+  return `${Math.floor(wholeSeconds / 60)}:${String(wholeSeconds % 60).padStart(2, "0")}`;
+}
+
 const emptyForm: SourceForm = {
   platform: "직접 입력",
   title: "",
@@ -58,7 +149,7 @@ const scriptFields: Array<{ key: keyof Script; label: string; hint: string }> = 
   { key: "seung", label: "승", hint: "댓글의 관심 질문을 따라 전개" },
   { key: "jeon", label: "전", hint: "핵심 정보와 전환점을 제시" },
   { key: "gyeol", label: "결", hint: "검증된 핵심 내용을 마무리" },
-  { key: "cta", label: "CTA", hint: "사용자가 지정한 댓글·팔로우 유도 문구" }
+  { key: "cta", label: "고정 CTA", hint: "모든 대본의 마지막에 동일하게 포함" }
 ];
 
 export default function Home() {
@@ -72,6 +163,10 @@ export default function Home() {
   const [uploadedSourceId, setUploadedSourceId] = useState<string | null>(null);
   const [uploadTitle, setUploadTitle] = useState("");
   const [uploadNotes, setUploadNotes] = useState("");
+  const [videoAnalysis, setVideoAnalysis] = useState<LocalVideoAnalysis | null>(null);
+  const [recommendedTitles, setRecommendedTitles] = useState<string[]>([]);
+  const [selectedRecommendedTitle, setSelectedRecommendedTitle] = useState("");
+  const [analyzingVideo, setAnalyzingVideo] = useState(false);
   const [youtubeQuery, setYoutubeQuery] = useState("");
   const [youtubeOrder, setYoutubeOrder] = useState<"viewCount" | "date">("viewCount");
   const [youtubeCandidates, setYoutubeCandidates] = useState<YouTubeCandidate[]>([]);
@@ -90,7 +185,13 @@ export default function Home() {
         setSources(parsedSources);
         if (parsedSources[0]) setSelectedSourceId(parsedSources[0].id);
       }
-      if (savedDrafts) setDrafts(JSON.parse(savedDrafts) as Draft[]);
+      if (savedDrafts) {
+        const parsedDrafts = JSON.parse(savedDrafts) as Draft[];
+        setDrafts(parsedDrafts.map((draft) => {
+          const script = { ...draft.script, cta: DEFAULT_CTA };
+          return { ...draft, script, captions: makeCaptionVariants(script) };
+        }));
+      }
     } catch {
       setNotice("저장된 브라우저 데이터 일부를 읽지 못했습니다. 새 소재를 입력해 계속할 수 있습니다.");
     }
@@ -255,17 +356,51 @@ export default function Home() {
   function handleVideoFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0] ?? null;
     if (!file) return;
-    if (!file.type.startsWith("video/")) {
+    if (!file.type.startsWith("video/") && !/\.(mp4|mov|webm|m4v|ogv)$/i.test(file.name)) {
       setNotice("동영상 파일을 선택해 주세요.");
       event.target.value = "";
       return;
     }
     setUploadedFile(file);
     setUploadedSourceId(null);
+    setVideoAnalysis(null);
+    setRecommendedTitles([]);
+    setSelectedRecommendedTitle("");
+    setUploadNotes("");
     const baseName = file.name.replace(/\.[^.]+$/, "");
     setUploadTitle(baseName);
     setSelectedDraftId(null);
     setNotice("영상 파일을 이 브라우저에 불러왔습니다. 원본은 서버로 업로드되지 않습니다.");
+  }
+
+  async function analyzeUploadedVideo() {
+    if (!uploadedFile) return;
+    setAnalyzingVideo(true);
+    setRecommendedTitles([]);
+    setSelectedRecommendedTitle("");
+    try {
+      const analysis = await inspectUploadedVideo(uploadedFile);
+      const fileBaseName = uploadTitle.trim();
+      const genericFileName = /^(kakaotalk|whatsapp|video|vid|mov|mp4|clip|recording|screen.?recording)[\s\d_-]*$/i.test(fileBaseName);
+      const noteTopic = uploadNotes.trim().split(/[\n.!?。！？]+/).map((part) => part.trim()).find(Boolean) ?? "";
+      const topic = (genericFileName ? noteTopic : noteTopic || fileBaseName).replace(/\s+/g, " ").slice(0, 30).trim();
+      if (!topic) {
+        setVideoAnalysis(analysis);
+        setNotice("영상 길이와 화면은 분석했습니다. 제목 추천을 위해 영상 주제나 장면 설명을 입력해 주세요.");
+        return;
+      }
+      setVideoAnalysis(analysis);
+      setRecommendedTitles([
+        `${topic} 핵심만 한눈에 보기`,
+        `${topic}에서 놓치기 쉬운 포인트`,
+        `궁금했던 ${topic}, 영상으로 정리`
+      ]);
+      setNotice("영상 길이·화면 비율·샘플 프레임을 분석했습니다. 제목은 입력한 주제와 설명을 바탕으로 추천했으니 세 가지 중 골라 주세요.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "영상 분석을 완료하지 못했습니다.");
+    } finally {
+      setAnalyzingVideo(false);
+    }
   }
 
   function createDraftsFromUploadedVideo() {
@@ -273,13 +408,16 @@ export default function Home() {
       setNotice("먼저 동영상 파일을 선택해 주세요.");
       return;
     }
-    const title = uploadTitle.trim() || uploadedFile.name.replace(/\.[^.]+$/, "");
+    if (!selectedRecommendedTitle) {
+      setNotice("먼저 영상 분석 후 추천된 제목 세 가지 중 하나를 선택해 주세요.");
+      return;
+    }
     const source: SourceItem = {
       id: crypto.randomUUID(),
       platform: "직접 입력",
-      title,
+      title: selectedRecommendedTitle,
       url: "",
-      notes: [uploadNotes.trim(), `업로드 파일: ${uploadedFile.name}`].filter(Boolean).join("\n\n"),
+      notes: uploadNotes.trim(),
       views: 0,
       likes: 0,
       comments: [],
@@ -300,6 +438,9 @@ export default function Home() {
     const existing = drafts.find((draft) => draft.sourceId === selectedSource.id && draft.scriptType === scriptType);
     if (existing) {
       setSelectedDraftId(existing.id);
+      setActiveCaption("clean");
+      const typeLabel = SCRIPT_TYPE_OPTIONS.find((option) => option.id === scriptType)?.label ?? "대본";
+      setNotice(`${typeLabel} 대본으로 전환했습니다.`);
       return;
     }
     const variants = drafts.some((draft) => draft.sourceId === selectedSource.id)
@@ -312,7 +453,7 @@ export default function Home() {
   }
 
   function updateScript(field: keyof Script, value: string) {
-    if (!selectedDraft) return;
+    if (!selectedDraft || field === "cta") return;
     setDrafts((items) =>
       items.map((draft) => {
         if (draft.id !== selectedDraft.id) return draft;
@@ -438,7 +579,7 @@ export default function Home() {
               <span className="step-tag">파일은 기기에만</span>
             </div>
             <p className="muted intro-text">
-              MP4·MOV·WebM 영상을 선택하세요. 장면·음성을 자동 분석하지는 않으므로, 대본의 정확도를 위해 영상 내용이나 기존 대사를 적어 주세요.
+              영상 길이·화면 비율·샘플 프레임을 이 기기에서 분석하고, 입력한 영상 설명을 바탕으로 제목 세 가지를 추천합니다. 장면·대사의 의미를 읽는 AI 분석은 연결되어 있지 않습니다.
             </p>
             <div className="source-form">
               <label>
@@ -452,16 +593,41 @@ export default function Home() {
                     <small>{(uploadedFile.size / (1024 * 1024)).toFixed(1)} MB · 업로드 후 이 브라우저 탭에서 사용</small>
                   </div>
                   <label>
-                    영상 제목
-                    <input value={uploadTitle} onChange={(event) => setUploadTitle(event.target.value)} placeholder="영상의 핵심 주제" />
+                    추천에 참고할 영상 주제
+                    <input value={uploadTitle} onChange={(event) => { setUploadTitle(event.target.value); setVideoAnalysis(null); setRecommendedTitles([]); setSelectedRecommendedTitle(""); }} placeholder="예: 접이식 수납장 조립 방법" />
                   </label>
                   <label>
-                    장면 설명·대사·원하는 메시지 <span className="field-note">대본 참고용</span>
-                    <textarea value={uploadNotes} onChange={(event) => setUploadNotes(event.target.value)} placeholder="영상에서 보여주는 내용, 이미 녹음된 대사, 꼭 지킬 사실이나 CTA를 적어 주세요." rows={4} />
+                    장면 설명·기존 대사·확인된 정보 <span className="field-note">제목·대본 참고용</span>
+                    <textarea value={uploadNotes} onChange={(event) => { setUploadNotes(event.target.value); setRecommendedTitles([]); setSelectedRecommendedTitle(""); }} placeholder="영상에서 실제로 보여주는 내용이나 말하는 대사, 과장하면 안 되는 사실을 적어 주세요." rows={4} />
                   </label>
-                  <button className="button button-dark full-width" type="button" onClick={createDraftsFromUploadedVideo}>
-                    업로드 영상으로 대본 3종 만들기 <span>→</span>
+                  <button className="button button-dark full-width" type="button" onClick={() => void analyzeUploadedVideo()} disabled={analyzingVideo}>
+                    {analyzingVideo ? "영상 분석 중…" : "영상 분석 후 제목 3가지 추천"} <span>→</span>
                   </button>
+                  {videoAnalysis && (
+                    <div className="video-analysis-card">
+                      <strong>기기 내 영상 분석</strong>
+                      <div className="video-analysis-chips">
+                        <span>{videoAnalysis.aspectLabel} · {videoAnalysis.width}×{videoAnalysis.height}</span>
+                        <span>{formatVideoDuration(videoAnalysis.durationSeconds)}</span>
+                        <span>{videoAnalysis.brightnessLabel}</span>
+                        <span>{videoAnalysis.visualChangeLabel}</span>
+                      </div>
+                      {recommendedTitles.length === 0 && <small>주제나 장면 설명을 적은 뒤 다시 추천받아 주세요.</small>}
+                    </div>
+                  )}
+                  {recommendedTitles.length > 0 && (
+                    <div className="recommended-title-list">
+                      <strong>추천 제목 중 하나를 선택하세요.</strong>
+                      {recommendedTitles.map((title, index) => (
+                        <button className={"recommended-title " + (selectedRecommendedTitle === title ? "selected" : "")} type="button" key={title} aria-pressed={selectedRecommendedTitle === title} onClick={() => setSelectedRecommendedTitle(title)}>
+                          <span>0{index + 1}</span><b>{title}</b>{selectedRecommendedTitle === title && <i>선택됨</i>}
+                        </button>
+                      ))}
+                      <button className="button button-dark full-width" type="button" disabled={!selectedRecommendedTitle} onClick={createDraftsFromUploadedVideo}>
+                        업로드 영상으로 대본 3종 만들기 <span>→</span>
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
               {!uploadedFile && <div className="upload-empty">영상 파일을 선택하면 제목과 설명을 적는 칸이 열립니다.</div>}
@@ -742,11 +908,15 @@ export default function Home() {
                   {scriptFields.map((field) => (
                     <label className={"script-field " + (field.key === "cta" ? "cta-field" : "")} key={field.key}>
                       <span><b>{field.label}</b><small>{field.hint}</small></span>
-                      <textarea
-                        value={selectedDraft.script[field.key]}
-                        onChange={(event) => updateScript(field.key, event.target.value)}
-                        rows={field.key === "hook" || field.key === "cta" ? 2 : 3}
-                      />
+                      {field.key === "cta" ? (
+                        <textarea value={DEFAULT_CTA} readOnly aria-label="모든 대본에 고정으로 들어가는 CTA" rows={2} />
+                      ) : (
+                        <textarea
+                          value={selectedDraft.script[field.key]}
+                          onChange={(event) => updateScript(field.key, event.target.value)}
+                          rows={field.key === "hook" ? 2 : 3}
+                        />
+                      )}
                     </label>
                   ))}
                 </div>
