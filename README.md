@@ -16,7 +16,7 @@ A local-first Korean Shorts workflow dashboard for collecting source notes, scor
 
 The assistant-side VerseIn connection can list available models without generating media. Image or video generation consumes VerseIn coins and needs approval for the specific job. This app does not call VerseIn yet.
 
-The GitHub repository `hearthk21-source/shorts-auto` is available for this project. The Vercel project `shorts-automation` exists, but its team currently has no linked Git projects and the Vercel GitHub namespace is unavailable in this session. Linking Vercel to GitHub requires that provider authorization; deployment remains a separate approval step.
+The GitHub repository `hearthk21-source/shorts-auto` is available for this project. The Vercel project `shorts-automation` exists, but it does not have a linked Git project yet. Vercel Git access must be granted separately, and deployment remains a separate approval step.
 
 Automated social-platform collection, AI rewriting, persistent database storage, VerseIn generation, direct messages, and publishing are not wired to external services yet. Do not put OAuth tokens, API keys, or other credentials in source files or browser storage.
 
